@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timedelta
 import os.path
 from pathlib import Path
+import time
 
 def formatTime(date, time):
     return datetime.strptime(date[2:] + ' ' + time, '%y-%m-%d %H%M')
@@ -29,9 +30,19 @@ def getMetrics(start, end, date):
                  'to_date': date,
                  'days': days}
         jsonQuery = json.loads(json.dumps(query))
-        r = requests.post('https://hsp-prod.rockshore.net/api/v1/serviceMetrics', headers=headers, json=jsonQuery,
-                          auth=credentials)
-        rJson = r.json()
+        sleeptime = 1
+        while True:
+            try:
+                r = requests.post('https://hsp-prod.rockshore.net/api/v1/serviceMetrics', headers=headers,
+                                  json=jsonQuery,
+                                  auth=credentials)
+                rJson = r.json()
+                break
+            except json.decoder.JSONDecodeError:
+                print('Got invalid response from API, trying again in ' + str(sleeptime) + ' seconds')
+                time.sleep(sleeptime)
+                sleeptime *= 2
+
         f = open('cache/' + start + '-' + end + '/' + date + '/metrics.json', 'w')
         json.dump(rJson, f)
         return rJson
@@ -88,6 +99,13 @@ def findMinimalJourney(legs, firstTrainIndex, stations, isPredicted):
     nextAvailable = firstTrain[1] + timedelta(minutes=int(conTimes[stations[1]]))
     journey.append((firstTrain[0], firstTrain[1]))
     for i in range(1, len(legs)):
+        #Fixed-time journeys
+        if stations[i] in fixedTimes and stations[i+1] in fixedTimes[stations[i]]:
+            journey.append((nextAvailable, nextAvailable + timedelta(minutes=int(fixedTimes[stations[i]][stations[i+1]][0]))))
+            nextAvailable = nextAvailable + timedelta(minutes=(int(fixedTimes[stations[i]][stations[i+1]][0]) + int(conTimes[stations[i+1]])))
+            continue
+
+        #Regular trains
         for j in range(0, len(legs[i][isPredicted])):
             if legs[i][isPredicted][j][0] is None:
                 continue
@@ -104,27 +122,39 @@ if __name__ == '__main__':
         credentials = (username.strip(), password.strip())
     headers = {'content-type': 'application/json'}
 
-    f = open('contimes.json', 'r')
-    conTimes = json.load(f)
+    f1 = open('contimes.json', 'r')
+    conTimes = json.load(f1)
 
-    for day in range(25, 29+1):
+    f2 = open('atocfixed.json', 'r')
+    fixedTimes = json.load(f2)
+
+    for day in range(10, 30+1):
         date = '2021-11-' + str(day)
         legs = []
-        stations = ['CBG', 'BHM', 'CSY']
+        stations = ['CBG', 'KGX', 'EUS', 'BHM', 'CSY']
         for i in range(len(stations)-1):
             legs.append(getData(stations[i], stations[i+1], date))
 
         for k in range(len(legs[0][0])):
             predJourney = findMinimalJourney(legs, k, stations, 0)
             actJourney = findMinimalJourney(legs, k, stations, 1)
-            if not ((len(predJourney) == 2) and (len(actJourney) == 2)):
+            if not ((len(predJourney) == len(stations)-1) and (len(actJourney) == len(stations)-1)):
                 continue
             delay = actJourney[-1][1] - predJourney[-1][1]
             if predJourney[-1][1] >= actJourney[-1][1]:
                 delay = timedelta(0)
-            if delay.seconds//60 >= 20:
+            if delay.seconds//60 >= 60:
                 print('Date: ' + datetime.strftime(predJourney[0][0], '%d-%m-%y'))
-                print('Journey: ' + datetime.strftime(predJourney[0][0], '%H:%M') + '-' + datetime.strftime(predJourney[-1][1], '%H:%M'))
+                strPredJourney = ''
+                strActJourney = ''
+                for i in range(len(predJourney)):
+                    strPredJourney += datetime.strftime(predJourney[i][0], '%H:%M') + '-' + datetime.strftime(predJourney[i][1], '%H:%M') + ', '
+                    strActJourney += datetime.strftime(actJourney[i][0], '%H:%M') + '-' + datetime.strftime(actJourney[i][1], '%H:%M') + ', '
+
+                #print('Journey: ' + datetime.strftime(predJourney[0][0], '%H:%M') + '-' + datetime.strftime(predJourney[-1][1], '%H:%M'))
+
+                print('Predicted journey: ' + strPredJourney)
+                print('Actual journey: ' + strActJourney)
                 print('Delay:' + str(delay.seconds//60) + ' minutes')
                 print('-------------')
 
