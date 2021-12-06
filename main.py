@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import os.path
 from pathlib import Path
 import time
+import pandas as pd
 
 def formatTime(date, time):
     return datetime.strptime(date[2:] + ' ' + time, '%y-%m-%d %H%M')
@@ -128,12 +129,13 @@ if __name__ == '__main__':
     f2 = open('atocfixed.json', 'r')
     fixedTimes = json.load(f2)
 
-    for day in range(10, 30+1):
-        date = '2021-11-' + str(day)
+    for date in pd.date_range(start=datetime.strptime('21-11-28', '%y-%m-%d'), end=datetime.strptime('21-12-05', '%y-%m-%d')):
+        strDate = datetime.strftime(date, '%Y-%m-%d')
+        print(strDate)
         legs = []
         stations = ['CBG', 'KGX', 'EUS', 'BHM', 'CSY']
         for i in range(len(stations)-1):
-            legs.append(getData(stations[i], stations[i+1], date))
+            legs.append(getData(stations[i], stations[i+1], strDate))
 
         for k in range(len(legs[0][0])):
             predJourney = findMinimalJourney(legs, k, stations, 0)
