@@ -6,6 +6,87 @@ from pathlib import Path
 import time
 import pandas as pd
 
+class trainData:
+    def __init__(self, startStation, endStation, initDate):
+        self.startDate = initDate
+        self.endDate = initDate
+        self.startStation = startStation
+        self.endStation = endStation
+        self.trains = []
+        self.addDay(initDate)
+        if self.startStation in fixedTimes and self.endStation in fixedTimes[self.startStation]:
+            self.isFixed = True
+            self.fixedTime = int(fixedTimes[self.startStation][self.endStation][0])
+        else:
+            self.isFixed = False
+            self.fixedTime = None
+
+    def addDay(self, day):
+        date = datetime.strftime(day, '%Y-%m-%d') #Temporary and bad, fix soon
+        r = getMetrics(self.startStation, self.endStation, date)
+        ridList = []
+        for service in r['Services']:
+            ridList.append(service['serviceAttributesMetrics']['rids'][0])
+
+        for rid in ridList:
+            r = getDetails(self.startStation, self.endStation, date, rid)
+
+            locations = r['serviceAttributesDetails']['locations']
+            desiredStations = [locations[i] for i in range(len(locations)) if
+                               locations[i]['location'] == self.startStation or locations[i]['location'] == self.endStation]
+
+            journeyPred = [
+            formatTime(date, desiredStations[0]['gbtt_ptd']), formatTime(date, desiredStations[1]['gbtt_pta'])]
+            if journeyPred[1] < journeyPred[0]:
+                journeyPred[1] += timedelta(days=1)
+            # TODO: Deal with cases where a train is cancelled halfway. Currently we just treat it as cancelled
+            if (not desiredStations[0]['actual_td'] == '') and (not desiredStations[1]['actual_ta'] == ''):
+                journeyAct = [
+                formatTime(date, desiredStations[0]['actual_td']), formatTime(date, desiredStations[1]['actual_ta'])]
+                if journeyAct[0] < journeyPred[0]-timedelta(hours=1):
+                    journeyAct[0] += timedelta(days=1)
+                if journeyAct[1] < journeyPred[0]-timedelta(hours=1):
+                    journeyAct[1] += timedelta(days=1)
+            else:
+                journeyAct = (None, None)
+            self.trains.append((rid, journeyPred[0], journeyPred[1], journeyAct[0], journeyAct[1]))
+
+    def getTrainsInRange(self, startRange, endRange):
+        if startRange < self.startDate:
+            for date in pd.date_range(start=startRange, end=self.startDate-timedelta(days=1)):
+                self.addDay(date)
+        if endRange > self.endDate:
+            for date in pd.date_range(start=self.endDate+timedelta(days=1), end=endRange):
+                self.addDay(date)
+
+        return [train for train in self.trains if train[1] >= startRange and train[1] <= endRange]
+
+    def getTrainByRid(self, rid):
+        return next((train for train in self.trains if train[0] == rid))
+
+    def getNextTrainPredAfter(self, time):
+        if self.isFixed:
+            return ((None, time, time + timedelta(minutes=self.fixedTime), time, time + timedelta(minutes=self.fixedTime)))
+        while True:
+            nextTrain = min([train for train in self.trains if train[1] > time], key=lambda t: t[1], default=None)
+            if nextTrain is not None:
+                return nextTrain
+            self.endDate += timedelta(days=1)
+            self.addDay(self.endDate)
+            #TODO: Deal with us hitting the current day
+
+    def getNextTrainActAfter(self, time):
+        if self.isFixed:
+            return ((None, time, time + timedelta(minutes=self.fixedTime), time, time + timedelta(minutes=self.fixedTime)))
+        while True:
+            nextTrain = min([train for train in self.trains if train[3] is not None and train[3] > time], key=lambda t: t[3], default=None)
+            if nextTrain is not None:
+                return nextTrain
+            self.endDate += timedelta(days=1)
+            self.addDay(self.endDate)
+            #TODO: Deal with us hitting the current day
+
+
 def formatTime(date, time):
     return datetime.strptime(date[2:] + ' ' + time, '%y-%m-%d %H%M')
 
@@ -61,60 +142,35 @@ def getDetails(start, end, date, rid):
         json.dump(rJson, f)
         return rJson
 
-def getData(start, end, date):
-    rDict = getMetrics(start, end, date)
-
-    ridList = []
-    for service in rDict['Services']:
-        ridList.append(service['serviceAttributesMetrics']['rids'][0])
-
-    journeyPreds = []
-    journeyActs = []
-    for rid in ridList:
-        r = getDetails(start, end, date, rid)
-
-        locations = r['serviceAttributesDetails']['locations']
-        desiredStations = [locations[i] for i in range(len(locations)) if
-                           locations[i]['location'] == start or locations[i]['location'] == end]
-
-        journeyPred = (formatTime(date, desiredStations[0]['gbtt_ptd']), formatTime(date, desiredStations[1]['gbtt_pta']))
-        #TODO: Deal with cases where a train is cancelled halfway. Currently we just treat it as cancelled
-        if (not desiredStations[0]['actual_td'] == '') and (not desiredStations[1]['actual_ta'] == ''):
-            journeyAct = (formatTime(date, desiredStations[0]['actual_td']), formatTime(date, desiredStations[1]['actual_ta']))
-        else:
-            journeyAct = (None, None)
-        journeyPreds.append(journeyPred)
-        journeyActs.append(journeyAct)
-    return (journeyPreds, journeyActs)
-
-def findMinimalJourney(legs, firstTrainIndex, stations, isPredicted):
-    #TODO: Deal with cancelled trains
+def findMinPredJourney(trainDataList, firstTrain):
     journey = []
-    for i in range(firstTrainIndex, len(legs[0][0])):
-        firstTrain = legs[0][isPredicted][i]
-        if not firstTrain == (None, None):
-            break
-    if firstTrain == (None, None):
-        return []
-
-    nextAvailable = firstTrain[1] + timedelta(minutes=int(conTimes[stations[1]]))
-    journey.append((firstTrain[0], firstTrain[1]))
-    for i in range(1, len(legs)):
-        #Fixed-time journeys
-        if stations[i] in fixedTimes and stations[i+1] in fixedTimes[stations[i]]:
-            journey.append((nextAvailable, nextAvailable + timedelta(minutes=int(fixedTimes[stations[i]][stations[i+1]][0]))))
-            nextAvailable = nextAvailable + timedelta(minutes=(int(fixedTimes[stations[i]][stations[i+1]][0]) + int(conTimes[stations[i+1]])))
-            continue
-
-        #Regular trains
-        for j in range(0, len(legs[i][isPredicted])):
-            if legs[i][isPredicted][j][0] is None:
-                continue
-            if legs[i][isPredicted][j][0] >= nextAvailable:
-                nextAvailable = legs[i][isPredicted][j][1] + timedelta(minutes=int(conTimes[stations[i+1]]))
-                journey.append((legs[i][isPredicted][j][0], legs[i][isPredicted][j][1]))
-                break
+    nextAvailable = firstTrain[2] + timedelta(minutes=int(conTimes[trainDataList[0].endStation]))
+    journey.append(firstTrain)
+    for leg in trainDataList[1:]:
+        nextTrain = leg.getNextTrainPredAfter(nextAvailable)
+        journey.append(nextTrain)
+        nextAvailable = nextTrain[2] + timedelta(minutes=int(conTimes[leg.endStation]))
     return journey
+
+def findMinActJourney(trainDataList, predJourney):
+    #Current behavior: If planned train is not makeable or cancelled, get the next train.
+    #If current train is makeable but late and another train arrives in the meantime, take it
+    journey = []
+    nextAvailable = predJourney[0][1]
+    for i in range(0, len(trainDataList)):
+        if (not predJourney[i][3] is None) and (predJourney[i][3] >= nextAvailable) and (not predJourney[i][0] is None): #Makeable and not fixed:
+            possibleTrain = trainDataList[i].getNextTrainActAfter(predJourney[i][1])
+            if possibleTrain[3] < predJourney[i][3]:
+                nextTrain = possibleTrain
+            else:
+                nextTrain = predJourney[i]
+        else:
+            nextTrain = trainDataList[i].getNextTrainActAfter(nextAvailable)
+
+        journey.append(nextTrain)
+        nextAvailable = nextTrain[4] + timedelta(minutes=int(conTimes[trainDataList[i].endStation]))
+    return journey
+
 
 if __name__ == '__main__':
     with open('auth.txt') as f:
@@ -129,37 +185,33 @@ if __name__ == '__main__':
     f2 = open('atocfixed.json', 'r')
     fixedTimes = json.load(f2)
 
-    for date in pd.date_range(start=datetime.strptime('21-11-28', '%y-%m-%d'), end=datetime.strptime('21-12-05', '%y-%m-%d')):
-        strDate = datetime.strftime(date, '%Y-%m-%d')
-        print(strDate)
-        legs = []
-        stations = ['CBG', 'KGX', 'EUS', 'BHM', 'CSY']
-        for i in range(len(stations)-1):
-            legs.append(getData(stations[i], stations[i+1], strDate))
+    stations = ['CBG', 'KGX', 'EUS', 'BHM', 'CSY']
 
-        for k in range(len(legs[0][0])):
-            predJourney = findMinimalJourney(legs, k, stations, 0)
-            actJourney = findMinimalJourney(legs, k, stations, 1)
-            if not ((len(predJourney) == len(stations)-1) and (len(actJourney) == len(stations)-1)):
-                continue
-            delay = actJourney[-1][1] - predJourney[-1][1]
-            if predJourney[-1][1] >= actJourney[-1][1]:
-                delay = timedelta(0)
-            if delay.seconds//60 >= 60:
-                print('Date: ' + datetime.strftime(predJourney[0][0], '%d-%m-%y'))
-                strPredJourney = ''
-                strActJourney = ''
-                for i in range(len(predJourney)):
-                    strPredJourney += datetime.strftime(predJourney[i][0], '%H:%M') + '-' + datetime.strftime(predJourney[i][1], '%H:%M') + ', '
-                    strActJourney += datetime.strftime(actJourney[i][0], '%H:%M') + '-' + datetime.strftime(actJourney[i][1], '%H:%M') + ', '
+    startDate = datetime.strptime('21-12-01', '%y-%m-%d')
+    endDate = datetime.strptime('21-12-06', '%y-%m-%d')
 
-                #print('Journey: ' + datetime.strftime(predJourney[0][0], '%H:%M') + '-' + datetime.strftime(predJourney[-1][1], '%H:%M'))
+    trainDataList = []
+    for i in range(1, len(stations)):
+        trainDataList.append(trainData(stations[i-1], stations[i], startDate))
+    firstTrainList = trainDataList[0].getTrainsInRange(startDate, endDate)
 
-                print('Predicted journey: ' + strPredJourney)
-                print('Actual journey: ' + strActJourney)
-                print('Delay:' + str(delay.seconds//60) + ' minutes')
-                print('-------------')
+    for train in firstTrainList:
+        p = findMinPredJourney(trainDataList, train)
+        a = findMinActJourney(trainDataList, p)
+        delay = a[-1][4] - p[-1][2]
+        if p[-1][2] >= a[-1][4]:
+            delay = timedelta(0)
+        if delay.seconds // 60 >= 60:
+            print('Date: ' + datetime.strftime(p[0][1], '%d-%m-%y'))
+            strPredJourney = ''
+            strActJourney = ''
+            for i in range(len(p)):
+                strPredJourney += datetime.strftime(p[i][1], '%H:%M') + '-' + datetime.strftime(
+                    p[i][2], '%H:%M') + ', '
+                strActJourney += datetime.strftime(a[i][3], '%H:%M') + '-' + datetime.strftime(
+                    a[i][4], '%H:%M') + ', '
 
-
-
-
+            print('Predicted journey: ' + strPredJourney)
+            print('Actual journey: ' + strActJourney)
+            print('Delay:' + str(delay.seconds // 60) + ' minutes')
+            print('-------------')
